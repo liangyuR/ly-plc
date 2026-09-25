@@ -51,3 +51,5 @@ cargo run --example probe -- config.json 点位ID=值 ...
 ```
 
 读取 JSON 配置、连接 PLC、执行写入并打印全部点位当前值与日志。
+
+无硬件时可用 `tools/` 下的 Modbus / S7 / MC 测试服务端配合 probe 自测，见 [tools/README.md](tools/README.md)。

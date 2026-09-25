@@ -1,0 +1,11 @@
+{
+  "connection": { "protocol": "mc", "host": "127.0.0.1", "port": 5007 },
+  "points": [
+    { "id": "d100", "name": "D100 F32", "address": "D100", "dataType": "f32", "access": "readWrite" },
+    { "id": "d102", "name": "D102 I32", "address": "D102", "dataType": "i32", "access": "readWrite" },
+    { "id": "d110", "name": "D110 I16", "address": "D110", "dataType": "i16", "access": "readWrite" },
+    { "id": "d120a", "name": "D120.A", "address": "D120.A", "dataType": "bool", "access": "readWrite" },
+    { "id": "x1f", "name": "X1F", "address": "X1F", "dataType": "bool" },
+    { "id": "m3", "name": "M3", "address": "M3", "dataType": "bool", "access": "readWrite", "edge": "both" }
+  ]
+}

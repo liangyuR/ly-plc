@@ -1,0 +1,2 @@
+pymodbus>=3.15
+python-snap7>=3.2

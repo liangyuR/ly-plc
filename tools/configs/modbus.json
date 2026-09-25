@@ -1,0 +1,11 @@
+{
+  "connection": { "protocol": "modbusTcp", "host": "127.0.0.1", "port": 1502 },
+  "heartbeat": { "pointId": "hb", "intervalMs": 500 },
+  "points": [
+    { "id": "hr20", "name": "HR20 F32", "address": "HR20", "dataType": "f32", "access": "readWrite" },
+    { "id": "cdab", "name": "40031 U32 CDAB", "address": "40031", "dataType": "u32", "wordOrder": "CDAB", "access": "readWrite" },
+    { "id": "bit", "name": "HR40.3", "address": "HR40.3", "dataType": "bool", "access": "readWrite", "edge": "rising" },
+    { "id": "hb", "name": "C0 心跳", "address": "C0", "dataType": "bool", "access": "readWrite", "logChanges": false },
+    { "id": "ir5", "name": "IR5", "address": "IR5", "dataType": "i16" }
+  ]
+}

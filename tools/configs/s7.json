@@ -1,0 +1,12 @@
+{
+  "connection": { "protocol": "s7", "host": "127.0.0.1", "port": 1102, "s7": { "rack": 0, "slot": 1 } },
+  "points": [
+    { "id": "i16", "name": "DB1.DBW4", "address": "DB1.DBW4", "dataType": "i16", "access": "readWrite" },
+    { "id": "f32", "name": "DB1.DBD20", "address": "DB1.DBD20", "dataType": "f32", "access": "readWrite" },
+    { "id": "f64", "name": "DB1.30 LReal", "address": "DB1.30", "dataType": "f64", "access": "readWrite" },
+    { "id": "u8", "name": "DB2.DBB0", "address": "DB2.DBB0", "dataType": "u8", "access": "readWrite" },
+    { "id": "m10_2", "name": "M10.2", "address": "M10.2", "dataType": "bool" },
+    { "id": "mw12", "name": "MW12", "address": "MW12", "dataType": "u16", "access": "readWrite" },
+    { "id": "missing", "name": "DB9.DBW0 不存在", "address": "DB9.DBW0", "dataType": "u16" }
+  ]
+}
