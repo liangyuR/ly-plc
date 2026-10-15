@@ -176,6 +176,7 @@ mod tests {
         let l = resolve("HR5.3", DataType::Bool).unwrap();
         assert_eq!(l.bit, Some(3));
         assert!(resolve("DI0", DataType::U16).is_err());
+        assert!(resolve("HR0", DataType::String).is_err());
         assert!(!resolve("IR2", DataType::U16).unwrap().writable);
     }
 }

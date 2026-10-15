@@ -26,12 +26,13 @@ pub enum DataType {
     I32,
     F32,
     F64,
+    String,
 }
 
 impl DataType {
     pub fn byte_size(self) -> u32 {
         match self {
-            DataType::Bool => 0,
+            DataType::Bool | DataType::String => 0,
             DataType::U8 | DataType::I8 => 1,
             DataType::U16 | DataType::I16 => 2,
             DataType::U32 | DataType::I32 | DataType::F32 => 4,

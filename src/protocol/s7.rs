@@ -45,20 +45,46 @@ pub fn resolve(address: &str, data_type: DataType) -> Result<Location, String> {
         };
         (code, db, strip_size(&a[1..]))
     };
+    let area = AreaKey {
+        code,
+        index: db,
+        unit: Unit::Byte,
+    };
+    if data_type == DataType::String {
+        return resolve_string(area, rest);
+    }
     let (main, bit) = split_bit(rest, 10)?;
     let offset: u32 = main.parse().map_err(|_| err())?;
     locate(
-        AreaKey {
-            code,
-            index: db,
-            unit: Unit::Byte,
-        },
+        area,
         offset,
         bit,
         data_type,
         true,
         0xFFFF,
     )
+}
+
+fn resolve_string(area: AreaKey, rest: &str) -> Result<Location, String> {
+    let (main, max) = rest
+        .split_once('.')
+        .ok_or("String 类型需写成 起始字节.最大长度，例如 DB1.DBB38.24")?;
+    let start: u32 = main.parse().map_err(|_| format!("无效的起始字节: {main}"))?;
+    let max: u32 = max.parse().map_err(|_| format!("无效的字符串最大长度: {max}"))?;
+    if !(1..=254).contains(&max) {
+        return Err("字符串最大长度需在 1-254 之间".into());
+    }
+    let len = max + 2;
+    if start as u64 + len as u64 - 1 > 0xFFFF {
+        return Err("地址越界".into());
+    }
+    Ok(Location {
+        area,
+        start,
+        len,
+        bit: None,
+        writable: true,
+    })
 }
 
 fn item_error(code: u8) -> String {
@@ -317,5 +343,14 @@ mod tests {
         assert_eq!(resolve("DB1.DBD0", DataType::F64).unwrap().len, 8);
         assert!(resolve("M10.8", DataType::Bool).is_err());
         assert!(resolve("M10", DataType::Bool).is_err());
+    }
+
+    #[test]
+    fn string_address_spans_header_and_max_length() {
+        let l = resolve("DB100.DBB38.24", DataType::String).unwrap();
+        assert_eq!((l.area.index, l.start, l.len, l.bit), (100, 38, 26, None));
+        for bad in ["DB100.DBB38", "DB100.DBB38.0", "DB100.DBB38.255", "DB100.DBB65520.24"] {
+            assert!(resolve(bad, DataType::String).is_err(), "{bad}");
+        }
     }
 }

@@ -10,6 +10,7 @@ pub enum PlcValue {
     Bool(bool),
     Int(i64),
     Float(f64),
+    Text(String),
 }
 
 impl PlcValue {
@@ -18,6 +19,7 @@ impl PlcValue {
             PlcValue::Bool(b) => *b,
             PlcValue::Int(i) => *i != 0,
             PlcValue::Float(f) => *f != 0.0,
+            PlcValue::Text(s) => !s.is_empty(),
         }
     }
 
@@ -26,8 +28,40 @@ impl PlcValue {
             PlcValue::Bool(b) => b.to_string(),
             PlcValue::Int(i) => i.to_string(),
             PlcValue::Float(f) => f.to_string(),
+            PlcValue::Text(s) => s.clone(),
         }
     }
+}
+
+/// S7 STRING：首字节为声明的最大长度，次字节为实际长度，随后是单字节字符；`bytes` 为点位完整区域。
+pub fn decode_string(bytes: &[u8]) -> Result<PlcValue, String> {
+    let max = bytes.len().checked_sub(2).ok_or("数据长度不足")?;
+    let (declared, actual) = (bytes[0] as usize, bytes[1] as usize);
+    if declared != max {
+        return Err(format!("PLC 字符串声明长度 {declared} 与点位最大长度 {max} 不符"));
+    }
+    if actual > max {
+        return Err(format!("PLC 字符串实际长度 {actual} 超过最大长度 {max}"));
+    }
+    Ok(PlcValue::Text(bytes[2..2 + actual].iter().map(|&b| b as char).collect()))
+}
+
+pub fn encode_string(value: &Value, max: usize) -> Result<Vec<u8>, String> {
+    let Value::String(s) = value else {
+        return Err("String 类型需写入字符串".into());
+    };
+    let chars = s
+        .chars()
+        .map(|c| u8::try_from(c as u32).map_err(|_| format!("字符「{c}」超出 S7 单字节字符范围")))
+        .collect::<Result<Vec<u8>, String>>()?;
+    if chars.len() > max {
+        return Err(format!("字符串长度 {} 超过最大长度 {max}", chars.len()));
+    }
+    let mut out = vec![0u8; max + 2];
+    out[0] = max as u8;
+    out[1] = chars.len() as u8;
+    out[2..2 + chars.len()].copy_from_slice(&chars);
+    Ok(out)
 }
 
 pub fn reorder(bytes: &[u8], order: WordOrder) -> Vec<u8> {
@@ -62,7 +96,7 @@ pub fn decode(bytes: &[u8], data_type: DataType, order: WordOrder) -> Result<Plc
     }
     let v = reorder(&bytes[..n], order);
     Ok(match data_type {
-        DataType::Bool => unreachable!(),
+        DataType::Bool | DataType::String => unreachable!(),
         DataType::U8 => PlcValue::Int(v[0] as i64),
         DataType::I8 => PlcValue::Int(v[0] as i8 as i64),
         DataType::U16 => PlcValue::Int(u16::from_be_bytes([v[0], v[1]]) as i64),
@@ -129,6 +163,7 @@ pub fn encode(value: &Value, data_type: DataType, order: WordOrder) -> Result<Ve
             .to_vec(),
         DataType::F32 => (parse_number(value)? as f32).to_be_bytes().to_vec(),
         DataType::F64 => parse_number(value)?.to_be_bytes().to_vec(),
+        DataType::String => return Err("String 类型需按点位最大长度编码".into()),
     };
     Ok(reorder(&be, order))
 }
@@ -163,5 +198,20 @@ mod tests {
             encode(&json!(0x12345678u32), DataType::U32, WordOrder::Cdab).unwrap(),
             vec![0x56, 0x78, 0x12, 0x34]
         );
+    }
+
+    #[test]
+    fn s7_string_writes_declared_max_and_round_trips() {
+        let bytes = encode_string(&json!("SN-A1"), 8).unwrap();
+        assert_eq!(bytes, [8, 5, b'S', b'N', b'-', b'A', b'1', 0, 0, 0]);
+        assert_eq!(decode_string(&bytes).unwrap(), PlcValue::Text("SN-A1".into()));
+        assert!(encode_string(&json!("123456789"), 8).is_err());
+        assert!(encode_string(&json!("编号"), 8).is_err());
+    }
+
+    #[test]
+    fn s7_string_with_mismatched_header_is_rejected() {
+        assert!(decode_string(&[0, 0, 0, 0, 0, 0]).is_err());
+        assert!(decode_string(&[4, 5, b'a', b'b', b'c', b'd']).is_err());
     }
 }
