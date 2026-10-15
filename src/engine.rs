@@ -55,6 +55,11 @@ impl CompiledPoint {
     fn encode(&self, value: &Value) -> Result<WriteValue, String> {
         if self.point.data_type == DataType::Bool {
             Ok(WriteValue::Bit(value::parse_bool(value)?))
+        } else if self.point.data_type == DataType::String {
+            Ok(WriteValue::Bytes(value::encode_string(
+                value,
+                self.loc.len as usize - 2,
+            )?))
         } else {
             Ok(WriteValue::Bytes(value::encode(
                 value,
@@ -83,6 +88,9 @@ impl CompiledPoint {
                         self.loc.area.unit,
                         bit,
                     ))),
+                    None if self.point.data_type == DataType::String => {
+                        value::decode_string(slice)
+                    }
                     None => value::decode(slice, self.point.data_type, self.order),
                 }
             }
