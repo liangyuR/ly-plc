@@ -69,7 +69,7 @@ pub struct ModbusTcp {
 
 fn flatten<T>(r: Result<tokio_modbus::Result<T>, Elapsed>) -> Result<T, DriverError> {
     match r {
-        Err(_) => Err(DriverError::Link("通讯超时".into())),
+        Err(_) => Err(DriverError::Timeout("通讯超时".into())),
         Ok(Err(e)) => Err(DriverError::Link(format!("通讯错误: {e}"))),
         Ok(Ok(Err(code))) => Err(DriverError::Exception(format!("PLC 异常响应: {code:?}"))),
         Ok(Ok(Ok(v))) => Ok(v),
@@ -77,7 +77,7 @@ fn flatten<T>(r: Result<tokio_modbus::Result<T>, Elapsed>) -> Result<T, DriverEr
 }
 
 impl ModbusTcp {
-    pub async fn connect(cfg: &ConnectionConfig) -> Result<Self, String> {
+    pub async fn connect(cfg: &ConnectionConfig) -> Result<Self, DriverError> {
         let dur = Duration::from_millis(cfg.timeout_ms);
         let addr = super::resolve_addr(&cfg.host, cfg.port, dur).await?;
         let ctx = timeout(
@@ -85,8 +85,8 @@ impl ModbusTcp {
             tokio_modbus::client::tcp::connect_slave(addr, Slave(cfg.modbus.unit_id)),
         )
         .await
-        .map_err(|_| format!("连接超时: {addr}"))?
-        .map_err(|e| format!("连接失败 {addr}: {e}"))?;
+        .map_err(|_| DriverError::Timeout(format!("连接超时: {addr}")))?
+        .map_err(|e| DriverError::Link(format!("连接失败 {addr}: {e}")))?;
         Ok(Self { ctx, timeout: dur })
     }
 

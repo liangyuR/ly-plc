@@ -80,7 +80,7 @@ pub struct Mc {
 }
 
 impl Mc {
-    pub async fn connect(cfg: &ConnectionConfig) -> Result<Self, String> {
+    pub async fn connect(cfg: &ConnectionConfig) -> Result<Self, DriverError> {
         let dur = Duration::from_millis(cfg.timeout_ms);
         let stream = tcp_connect(&cfg.host, cfg.port, dur).await?;
         let timer = (cfg.timeout_ms / 250).clamp(1, 0xFFFF) as u16;
@@ -137,7 +137,7 @@ impl Mc {
         };
         let buf = timeout(self.timeout, io)
             .await
-            .map_err(|_| DriverError::Link("通讯超时".into()))?
+            .map_err(|_| DriverError::Timeout("通讯超时".into()))?
             .map_err(|e| DriverError::Link(format!("通讯错误: {e}")))?;
         let end = u16::from_le_bytes([buf[0], buf[1]]);
         if end != 0 {

@@ -50,31 +50,48 @@ pub fn resolve(address: &str, data_type: DataType) -> Result<Location, String> {
         index: db,
         unit: Unit::Byte,
     };
-    if data_type == DataType::String {
-        return resolve_string(area, rest);
+    match data_type {
+        DataType::String => return resolve_span(area, rest, SpanKind::String),
+        DataType::Bytes => return resolve_span(area, rest, SpanKind::Bytes),
+        _ => {}
     }
     let (main, bit) = split_bit(rest, 10)?;
     let offset: u32 = main.parse().map_err(|_| err())?;
-    locate(
-        area,
-        offset,
-        bit,
-        data_type,
-        true,
-        0xFFFF,
-    )
+    locate(area, offset, bit, data_type, true, 0xFFFF)
 }
 
-fn resolve_string(area: AreaKey, rest: &str) -> Result<Location, String> {
-    let (main, max) = rest
-        .split_once('.')
-        .ok_or("String 类型需写成 起始字节.最大长度，例如 DB1.DBB38.24")?;
-    let start: u32 = main.parse().map_err(|_| format!("无效的起始字节: {main}"))?;
-    let max: u32 = max.parse().map_err(|_| format!("无效的字符串最大长度: {max}"))?;
-    if !(1..=254).contains(&max) {
-        return Err("字符串最大长度需在 1-254 之间".into());
-    }
-    let len = max + 2;
+enum SpanKind {
+    String,
+    Bytes,
+}
+
+/// `起始字节.长度` 形式的变长区域。STRING 的长度是最大字符数（区域另含 2 字节头），Bytes 的长度就是字节数。
+fn resolve_span(area: AreaKey, rest: &str, kind: SpanKind) -> Result<Location, String> {
+    let (main, n) = rest.split_once('.').ok_or(match kind {
+        SpanKind::String => "String 类型需写成 起始字节.最大长度，例如 DB1.DBB38.24",
+        SpanKind::Bytes => "Bytes 类型需写成 起始字节.字节数，例如 DB1.DBB38.26",
+    })?;
+    let start: u32 = main
+        .parse()
+        .map_err(|_| format!("无效的起始字节: {main}"))?;
+    let len = match kind {
+        SpanKind::String => {
+            let max: u32 = n
+                .parse()
+                .map_err(|_| format!("无效的字符串最大长度: {n}"))?;
+            if !(1..=254).contains(&max) {
+                return Err("字符串最大长度需在 1-254 之间".into());
+            }
+            max + 2
+        }
+        SpanKind::Bytes => {
+            let n: u32 = n.parse().map_err(|_| format!("无效的字节数: {n}"))?;
+            if !(1..=256).contains(&n) {
+                return Err("字节数需在 1-256 之间".into());
+            }
+            n
+        }
+    };
     if start as u64 + len as u64 - 1 > 0xFFFF {
         return Err("地址越界".into());
     }
@@ -118,6 +135,14 @@ fn header_error(s7: &[u8]) -> Option<String> {
     ))
 }
 
+fn with_context(e: DriverError, context: &str) -> DriverError {
+    match e {
+        DriverError::Link(m) => DriverError::Link(format!("{context}: {m}")),
+        DriverError::Timeout(m) => DriverError::Timeout(format!("{context}: {m}")),
+        DriverError::Exception(m) => DriverError::Exception(format!("{context}: {m}")),
+    }
+}
+
 pub struct S7 {
     stream: TcpStream,
     timeout: Duration,
@@ -126,7 +151,7 @@ pub struct S7 {
 }
 
 impl S7 {
-    pub async fn connect(cfg: &ConnectionConfig) -> Result<Self, String> {
+    pub async fn connect(cfg: &ConnectionConfig) -> Result<Self, DriverError> {
         let dur = Duration::from_millis(cfg.timeout_ms);
         let stream = tcp_connect(&cfg.host, cfg.port, dur).await?;
         let mut client = Self {
@@ -145,11 +170,11 @@ impl S7 {
         let cc = client
             .roundtrip(&cr)
             .await
-            .map_err(|e| format!("COTP 连接失败: {e}"))?;
+            .map_err(|e| with_context(e, "COTP 连接失败"))?;
         if cc.get(5) != Some(&0xD0) {
-            return Err(format!(
+            return Err(DriverError::Exception(format!(
                 "COTP 连接被拒绝，请检查机架/插槽或 TSAP (远端 0x{remote:04X})"
-            ));
+            )));
         }
         let [ph, pl] = cfg.s7.pdu_size.to_be_bytes();
         let setup = [
@@ -159,9 +184,9 @@ impl S7 {
         let s7 = client
             .exchange(&setup)
             .await
-            .map_err(|e| format!("S7 通讯协商失败: {e}"))?;
+            .map_err(|e| with_context(e, "S7 通讯协商失败"))?;
         if let Some(e) = header_error(&s7) {
-            return Err(e);
+            return Err(DriverError::Exception(e));
         }
         if s7.len() >= 20 {
             client.pdu = u16::from_be_bytes([s7[18], s7[19]]).max(240);
@@ -186,7 +211,7 @@ impl S7 {
         };
         timeout(self.timeout, io)
             .await
-            .map_err(|_| DriverError::Link("通讯超时".into()))?
+            .map_err(|_| DriverError::Timeout("通讯超时".into()))?
             .map_err(|e| DriverError::Link(format!("通讯错误: {e}")))
     }
 
@@ -349,8 +374,23 @@ mod tests {
     fn string_address_spans_header_and_max_length() {
         let l = resolve("DB100.DBB38.24", DataType::String).unwrap();
         assert_eq!((l.area.index, l.start, l.len, l.bit), (100, 38, 26, None));
-        for bad in ["DB100.DBB38", "DB100.DBB38.0", "DB100.DBB38.255", "DB100.DBB65520.24"] {
+        for bad in [
+            "DB100.DBB38",
+            "DB100.DBB38.0",
+            "DB100.DBB38.255",
+            "DB100.DBB65520.24",
+        ] {
             assert!(resolve(bad, DataType::String).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn bytes_address_length_is_the_byte_count() {
+        let l = resolve("DB308.DBB100.42", DataType::Bytes).unwrap();
+        assert_eq!((l.area.index, l.start, l.len, l.bit), (308, 100, 42, None));
+        assert_eq!(resolve("M0.256", DataType::Bytes).unwrap().len, 256);
+        for bad in ["DB1.DBB0", "DB1.DBB0.0", "DB1.DBB0.257", "DB1.DBB65535.2"] {
+            assert!(resolve(bad, DataType::Bytes).is_err(), "{bad}");
         }
     }
 }

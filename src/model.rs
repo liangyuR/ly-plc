@@ -27,12 +27,15 @@ pub enum DataType {
     F32,
     F64,
     String,
+    /// 原始字节，长度写在地址里（仅 S7，如 `DB1.DBB38.26`），值为 `PlcValue::Bytes`。
+    Bytes,
 }
 
 impl DataType {
+    /// 定长类型的字节数；`Bool` / `String` / `Bytes` 的长度取决于地址，返回 0。
     pub fn byte_size(self) -> u32 {
         match self {
-            DataType::Bool | DataType::String => 0,
+            DataType::Bool | DataType::String | DataType::Bytes => 0,
             DataType::U8 | DataType::I8 => 1,
             DataType::U16 | DataType::I16 => 2,
             DataType::U32 | DataType::I32 | DataType::F32 => 4,
@@ -83,6 +86,8 @@ pub struct PlcPoint {
     pub access: Access,
     pub edge: EdgeMode,
     pub log_changes: bool,
+    /// 为 `false` 时不参与轮询：不进 `values()`、不产生读取错误日志，只能写或用 `read_now` 按需读。
+    pub poll: bool,
     pub tags: Vec<String>,
     pub description: String,
 }
@@ -98,6 +103,7 @@ impl Default for PlcPoint {
             access: Access::Read,
             edge: EdgeMode::None,
             log_changes: true,
+            poll: true,
             tags: Vec::new(),
             description: String::new(),
         }
@@ -310,6 +316,9 @@ impl PlcConfig {
                 .map_err(|e| format!("点位「{}」: {e}", p.name))?;
             if p.access == Access::ReadWrite && !loc.writable {
                 return Err(format!("点位「{}」所在区域只读", p.name));
+            }
+            if !p.poll && p.edge != EdgeMode::None {
+                return Err(format!("点位「{}」不轮询，不能配置边沿", p.name));
             }
         }
         if let Some(id) = &self.heartbeat.point_id {

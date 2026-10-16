@@ -64,15 +64,28 @@ pub enum WriteValue {
     Bytes(Vec<u8>),
 }
 
+#[derive(Debug)]
 pub enum DriverError {
+    /// 连接层的错误（断开、应答帧异常）：之后的请求都不可信，连接需要重建。
     Link(String),
+    /// 超时：应答可能迟到并错位到下一次请求上，连接同样需要重建。
+    Timeout(String),
+    /// PLC 应答了异常 / 拒绝，连接本身完好。
     Exception(String),
+}
+
+impl DriverError {
+    pub fn is_link(&self) -> bool {
+        !matches!(self, DriverError::Exception(_))
+    }
 }
 
 impl fmt::Display for DriverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DriverError::Link(m) | DriverError::Exception(m) => f.write_str(m),
+            DriverError::Link(m) | DriverError::Timeout(m) | DriverError::Exception(m) => {
+                f.write_str(m)
+            }
         }
     }
 }
@@ -130,7 +143,7 @@ pub fn default_order(kind: ProtocolKind) -> WordOrder {
 pub async fn connect(
     cfg: &ConnectionConfig,
     sim: &Arc<Mutex<sim::SimMemory>>,
-) -> Result<Box<dyn Protocol>, String> {
+) -> Result<Box<dyn Protocol>, DriverError> {
     Ok(match cfg.protocol {
         ProtocolKind::Simulator => Box::new(sim::Simulator::new(sim.clone())),
         ProtocolKind::ModbusTcp => Box::new(modbus::ModbusTcp::connect(cfg).await?),
@@ -147,8 +160,8 @@ pub(crate) fn locate(
     writable: bool,
     max_address: u32,
 ) -> Result<Location, String> {
-    if data_type == DataType::String {
-        return Err("String 类型仅支持 S7 字节地址".into());
+    if matches!(data_type, DataType::String | DataType::Bytes) {
+        return Err(format!("{data_type:?} 类型仅支持 S7 字节地址"));
     }
     let len = match area.unit {
         Unit::Bit => {
@@ -225,21 +238,27 @@ pub(crate) async fn resolve_addr(
     host: &str,
     port: u16,
     dur: Duration,
-) -> Result<SocketAddr, String> {
+) -> Result<SocketAddr, DriverError> {
     let target = format!("{}:{}", host.trim(), port);
     let mut addrs = timeout(dur, tokio::net::lookup_host(target.clone()))
         .await
-        .map_err(|_| format!("解析地址超时: {target}"))?
-        .map_err(|e| format!("无法解析地址 {target}: {e}"))?;
-    addrs.next().ok_or_else(|| format!("无法解析地址 {target}"))
+        .map_err(|_| DriverError::Timeout(format!("解析地址超时: {target}")))?
+        .map_err(|e| DriverError::Link(format!("无法解析地址 {target}: {e}")))?;
+    addrs
+        .next()
+        .ok_or_else(|| DriverError::Link(format!("无法解析地址 {target}")))
 }
 
-pub(crate) async fn tcp_connect(host: &str, port: u16, dur: Duration) -> Result<TcpStream, String> {
+pub(crate) async fn tcp_connect(
+    host: &str,
+    port: u16,
+    dur: Duration,
+) -> Result<TcpStream, DriverError> {
     let addr = resolve_addr(host, port, dur).await?;
     let stream = timeout(dur, TcpStream::connect(addr))
         .await
-        .map_err(|_| format!("连接超时: {addr}"))?
-        .map_err(|e| format!("连接失败 {addr}: {e}"))?;
+        .map_err(|_| DriverError::Timeout(format!("连接超时: {addr}")))?
+        .map_err(|e| DriverError::Link(format!("连接失败 {addr}: {e}")))?;
     let _ = stream.set_nodelay(true);
     Ok(stream)
 }
