@@ -11,6 +11,8 @@ pub enum PlcValue {
     Int(i64),
     Float(f64),
     Text(String),
+    /// `Bytes` 点位的原始字节，JSON 中为数字数组。
+    Bytes(Vec<u8>),
 }
 
 impl PlcValue {
@@ -20,6 +22,7 @@ impl PlcValue {
             PlcValue::Int(i) => *i != 0,
             PlcValue::Float(f) => *f != 0.0,
             PlcValue::Text(s) => !s.is_empty(),
+            PlcValue::Bytes(b) => b.iter().any(|&x| x != 0),
         }
     }
 
@@ -29,6 +32,11 @@ impl PlcValue {
             PlcValue::Int(i) => i.to_string(),
             PlcValue::Float(f) => f.to_string(),
             PlcValue::Text(s) => s.clone(),
+            PlcValue::Bytes(b) => b
+                .iter()
+                .map(|x| format!("{x:02X}"))
+                .collect::<Vec<_>>()
+                .join(" "),
         }
     }
 }
@@ -38,12 +46,16 @@ pub fn decode_string(bytes: &[u8]) -> Result<PlcValue, String> {
     let max = bytes.len().checked_sub(2).ok_or("数据长度不足")?;
     let (declared, actual) = (bytes[0] as usize, bytes[1] as usize);
     if declared != max {
-        return Err(format!("PLC 字符串声明长度 {declared} 与点位最大长度 {max} 不符"));
+        return Err(format!(
+            "PLC 字符串声明长度 {declared} 与点位最大长度 {max} 不符"
+        ));
     }
     if actual > max {
         return Err(format!("PLC 字符串实际长度 {actual} 超过最大长度 {max}"));
     }
-    Ok(PlcValue::Text(bytes[2..2 + actual].iter().map(|&b| b as char).collect()))
+    Ok(PlcValue::Text(
+        bytes[2..2 + actual].iter().map(|&b| b as char).collect(),
+    ))
 }
 
 pub fn encode_string(value: &Value, max: usize) -> Result<Vec<u8>, String> {
@@ -62,6 +74,23 @@ pub fn encode_string(value: &Value, max: usize) -> Result<Vec<u8>, String> {
     out[1] = chars.len() as u8;
     out[2..2 + chars.len()].copy_from_slice(&chars);
     Ok(out)
+}
+
+pub fn encode_bytes(value: &Value, len: usize) -> Result<Vec<u8>, String> {
+    let Value::Array(items) = value else {
+        return Err("Bytes 类型需写入字节数组，例如 [83, 78, 0]".into());
+    };
+    if items.len() != len {
+        return Err(format!("字节数 {} 与点位长度 {len} 不符", items.len()));
+    }
+    items
+        .iter()
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| format!("无效的字节: {v}"))
+        })
+        .collect()
 }
 
 pub fn reorder(bytes: &[u8], order: WordOrder) -> Vec<u8> {
@@ -96,7 +125,7 @@ pub fn decode(bytes: &[u8], data_type: DataType, order: WordOrder) -> Result<Plc
     }
     let v = reorder(&bytes[..n], order);
     Ok(match data_type {
-        DataType::Bool | DataType::String => unreachable!(),
+        DataType::Bool | DataType::String | DataType::Bytes => unreachable!(),
         DataType::U8 => PlcValue::Int(v[0] as i64),
         DataType::I8 => PlcValue::Int(v[0] as i8 as i64),
         DataType::U16 => PlcValue::Int(u16::from_be_bytes([v[0], v[1]]) as i64),
@@ -163,7 +192,9 @@ pub fn encode(value: &Value, data_type: DataType, order: WordOrder) -> Result<Ve
             .to_vec(),
         DataType::F32 => (parse_number(value)? as f32).to_be_bytes().to_vec(),
         DataType::F64 => parse_number(value)?.to_be_bytes().to_vec(),
-        DataType::String => return Err("String 类型需按点位最大长度编码".into()),
+        DataType::String | DataType::Bytes => {
+            return Err(format!("{data_type:?} 类型需按点位长度编码"))
+        }
     };
     Ok(reorder(&be, order))
 }
@@ -204,9 +235,28 @@ mod tests {
     fn s7_string_writes_declared_max_and_round_trips() {
         let bytes = encode_string(&json!("SN-A1"), 8).unwrap();
         assert_eq!(bytes, [8, 5, b'S', b'N', b'-', b'A', b'1', 0, 0, 0]);
-        assert_eq!(decode_string(&bytes).unwrap(), PlcValue::Text("SN-A1".into()));
+        assert_eq!(
+            decode_string(&bytes).unwrap(),
+            PlcValue::Text("SN-A1".into())
+        );
         assert!(encode_string(&json!("123456789"), 8).is_err());
         assert!(encode_string(&json!("编号"), 8).is_err());
+    }
+
+    #[test]
+    fn bytes_round_trip_through_json() {
+        let bytes = encode_bytes(&json!([8, 2, 83, 78, 0]), 5).unwrap();
+        assert_eq!(bytes, [8, 2, b'S', b'N', 0]);
+        let v = PlcValue::Bytes(bytes);
+        assert_eq!(v.display(), "08 02 53 4E 00");
+        assert!(v.is_truthy());
+        assert!(!PlcValue::Bytes(vec![0, 0]).is_truthy());
+        let text = serde_json::to_string(&v).unwrap();
+        assert_eq!(text, "[8,2,83,78,0]");
+        assert_eq!(serde_json::from_str::<PlcValue>(&text).unwrap(), v);
+        assert!(encode_bytes(&json!([1, 2]), 3).is_err());
+        assert!(encode_bytes(&json!([1, 256, 3]), 3).is_err());
+        assert!(encode_bytes(&json!("0102"), 2).is_err());
     }
 
     #[test]
