@@ -59,6 +59,35 @@ pub fn decode_string(bytes: &[u8]) -> Result<PlcValue, String> {
 }
 
 pub fn encode_string(value: &Value, max: usize) -> Result<Vec<u8>, String> {
+    let chars = single_byte_chars(value, max)?;
+    let mut out = vec![0u8; max + 2];
+    out[0] = max as u8;
+    out[1] = chars.len() as u8;
+    out[2..2 + chars.len()].copy_from_slice(&chars);
+    Ok(out)
+}
+
+/// S7-200 SMART 字符串：首字节为实际长度，随后是单字节字符，没有声明长度字节；`bytes` 为点位完整区域。
+pub fn decode_smart_string(bytes: &[u8]) -> Result<PlcValue, String> {
+    let max = bytes.len().checked_sub(1).ok_or("数据长度不足")?;
+    let actual = bytes[0] as usize;
+    if actual > max {
+        return Err(format!("PLC 字符串实际长度 {actual} 超过最大长度 {max}"));
+    }
+    Ok(PlcValue::Text(
+        bytes[1..1 + actual].iter().map(|&b| b as char).collect(),
+    ))
+}
+
+pub fn encode_smart_string(value: &Value, max: usize) -> Result<Vec<u8>, String> {
+    let chars = single_byte_chars(value, max)?;
+    let mut out = vec![0u8; max + 1];
+    out[0] = chars.len() as u8;
+    out[1..1 + chars.len()].copy_from_slice(&chars);
+    Ok(out)
+}
+
+fn single_byte_chars(value: &Value, max: usize) -> Result<Vec<u8>, String> {
     let Value::String(s) = value else {
         return Err("String 类型需写入字符串".into());
     };
@@ -69,11 +98,7 @@ pub fn encode_string(value: &Value, max: usize) -> Result<Vec<u8>, String> {
     if chars.len() > max {
         return Err(format!("字符串长度 {} 超过最大长度 {max}", chars.len()));
     }
-    let mut out = vec![0u8; max + 2];
-    out[0] = max as u8;
-    out[1] = chars.len() as u8;
-    out[2..2 + chars.len()].copy_from_slice(&chars);
-    Ok(out)
+    Ok(chars)
 }
 
 pub fn encode_bytes(value: &Value, len: usize) -> Result<Vec<u8>, String> {
@@ -125,7 +150,9 @@ pub fn decode(bytes: &[u8], data_type: DataType, order: WordOrder) -> Result<Plc
     }
     let v = reorder(&bytes[..n], order);
     Ok(match data_type {
-        DataType::Bool | DataType::String | DataType::Bytes => unreachable!(),
+        DataType::Bool | DataType::String | DataType::SmartString | DataType::Bytes => {
+            unreachable!()
+        }
         DataType::U8 => PlcValue::Int(v[0] as i64),
         DataType::I8 => PlcValue::Int(v[0] as i8 as i64),
         DataType::U16 => PlcValue::Int(u16::from_be_bytes([v[0], v[1]]) as i64),
@@ -192,7 +219,7 @@ pub fn encode(value: &Value, data_type: DataType, order: WordOrder) -> Result<Ve
             .to_vec(),
         DataType::F32 => (parse_number(value)? as f32).to_be_bytes().to_vec(),
         DataType::F64 => parse_number(value)?.to_be_bytes().to_vec(),
-        DataType::String | DataType::Bytes => {
+        DataType::String | DataType::SmartString | DataType::Bytes => {
             return Err(format!("{data_type:?} 类型需按点位长度编码"))
         }
     };
@@ -241,6 +268,23 @@ mod tests {
         );
         assert!(encode_string(&json!("123456789"), 8).is_err());
         assert!(encode_string(&json!("编号"), 8).is_err());
+    }
+
+    #[test]
+    fn smart_string_has_only_an_actual_length_byte_and_round_trips() {
+        let bytes = encode_smart_string(&json!("SN-A1"), 8).unwrap();
+        assert_eq!(bytes, [5, b'S', b'N', b'-', b'A', b'1', 0, 0, 0]);
+        assert_eq!(
+            decode_smart_string(&bytes).unwrap(),
+            PlcValue::Text("SN-A1".into())
+        );
+        assert_eq!(
+            decode_smart_string(&[0; 9]).unwrap(),
+            PlcValue::Text(String::new())
+        );
+        assert!(decode_smart_string(&[9, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(encode_smart_string(&json!("123456789"), 8).is_err());
+        assert!(encode_smart_string(&json!("编号"), 8).is_err());
     }
 
     #[test]

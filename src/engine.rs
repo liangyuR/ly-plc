@@ -130,6 +130,9 @@ impl CompiledPoint {
         match self.point.data_type {
             DataType::Bool => value::parse_bool(value).map(WriteValue::Bit),
             DataType::String => value::encode_string(value, len - 2).map(WriteValue::Bytes),
+            DataType::SmartString => {
+                value::encode_smart_string(value, len - 1).map(WriteValue::Bytes)
+            }
             DataType::Bytes => value::encode_bytes(value, len).map(WriteValue::Bytes),
             dt => value::encode(value, dt, self.order).map(WriteValue::Bytes),
         }
@@ -166,6 +169,7 @@ impl CompiledPoint {
                         bit,
                     ))),
                     (None, DataType::String) => value::decode_string(slice),
+                    (None, DataType::SmartString) => value::decode_smart_string(slice),
                     (None, DataType::Bytes) => Ok(PlcValue::Bytes(slice.to_vec())),
                     (None, dt) => value::decode(slice, dt, self.order),
                 }

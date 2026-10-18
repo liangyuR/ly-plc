@@ -27,15 +27,17 @@ pub enum DataType {
     F32,
     F64,
     String,
+    /// S7-200 SMART 字符串：首字节为实际长度，随后为单字节字符，没有声明长度字节（仅 S7，如 `VB100.50`）。
+    SmartString,
     /// 原始字节，长度写在地址里（仅 S7，如 `DB1.DBB38.26`），值为 `PlcValue::Bytes`。
     Bytes,
 }
 
 impl DataType {
-    /// 定长类型的字节数；`Bool` / `String` / `Bytes` 的长度取决于地址，返回 0。
+    /// 定长类型的字节数；`Bool` / `String` / `SmartString` / `Bytes` 的长度取决于地址，返回 0。
     pub fn byte_size(self) -> u32 {
         match self {
-            DataType::Bool | DataType::String | DataType::Bytes => 0,
+            DataType::Bool | DataType::String | DataType::SmartString | DataType::Bytes => 0,
             DataType::U8 | DataType::I8 => 1,
             DataType::U16 | DataType::I16 => 2,
             DataType::U32 | DataType::I32 | DataType::F32 => 4,

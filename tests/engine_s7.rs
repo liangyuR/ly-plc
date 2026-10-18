@@ -322,6 +322,28 @@ async fn bytes_point_keeps_a_string_header_the_string_type_rejects() {
     rig.engine.disconnect().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn smart_string_point_uses_a_single_length_byte_on_the_wire() {
+    let server = S7Server::start().await;
+    server.set_db(1, 100, &[3, b'A', b'B', b'C']);
+    let rig = rig(config(
+        server.port,
+        20,
+        vec![point("sn", "VB100.10", DataType::SmartString)],
+    ));
+    rig.start().await;
+    assert_eq!(
+        rig.engine.values()["sn"].value,
+        Some(PlcValue::Text("ABC".into()))
+    );
+    rig.engine.write_point("sn", &json!("SN-42")).await.unwrap();
+    assert_eq!(
+        server.db(1, 100, 12),
+        [5, b'S', b'N', b'-', b'4', b'2', 0, 0, 0, 0, 0, 0]
+    );
+    rig.engine.disconnect().await;
+}
+
 // ---- 4. 带类型的错误 ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
