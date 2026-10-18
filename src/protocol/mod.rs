@@ -160,7 +160,10 @@ pub(crate) fn locate(
     writable: bool,
     max_address: u32,
 ) -> Result<Location, String> {
-    if matches!(data_type, DataType::String | DataType::Bytes) {
+    if matches!(
+        data_type,
+        DataType::String | DataType::SmartString | DataType::Bytes
+    ) {
         return Err(format!("{data_type:?} 类型仅支持 S7 字节地址"));
     }
     let len = match area.unit {

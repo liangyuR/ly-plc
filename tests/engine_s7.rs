@@ -322,6 +322,82 @@ async fn bytes_point_keeps_a_string_header_the_string_type_rejects() {
     rig.engine.disconnect().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn smart_string_point_uses_a_single_length_byte_on_the_wire() {
+    let server = S7Server::start().await;
+    server.set_db(1, 100, &[3, b'A', b'B', b'C']);
+    let rig = rig(config(
+        server.port,
+        20,
+        vec![point("sn", "VB100.10", DataType::SmartString)],
+    ));
+    rig.start().await;
+    assert_eq!(
+        rig.engine.values()["sn"].value,
+        Some(PlcValue::Text("ABC".into()))
+    );
+    rig.engine.write_point("sn", &json!("SN-42")).await.unwrap();
+    assert_eq!(
+        server.db(1, 100, 11),
+        [5, b'S', b'N', b'-', b'4', b'2', 0, 0, 0, 0, 0]
+    );
+    rig.engine.disconnect().await;
+}
+
+#[test]
+fn point_beyond_one_frame_of_the_configured_pdu_fails_validation() {
+    // PDU 240：单帧读最多 222 字节、写最多 212 字节；SmartString `.n` 占 n + 1 字节。
+    for (address, access, ok) in [
+        ("VB0.221", Access::Read, true),
+        ("VB0.222", Access::Read, false),
+        ("VB0.211", Access::ReadWrite, true),
+        ("VB0.212", Access::ReadWrite, false),
+    ] {
+        let mut p = point("sn", address, DataType::SmartString);
+        p.access = access;
+        let mut cfg = config(102, 50, vec![p]);
+        cfg.connection.s7.pdu_size = 240;
+        assert_eq!(cfg.validate().is_ok(), ok, "{address} {access:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn point_beyond_one_frame_of_the_negotiated_pdu_is_rejected_without_a_request() {
+    // 请求 PDU 480 时校验放行，CPU（如 200 SMART）协商为 240：单帧最多读 222 字节、写 212 字节。
+    let server = S7Server::start().await;
+    server.set_pdu(240);
+    let mut big = point("big", "VB0.254", DataType::SmartString);
+    big.access = Access::Read;
+    let rig = rig(config(
+        server.port,
+        20,
+        vec![big, point("sn", "DB2.DBB0.220", DataType::SmartString)],
+    ));
+    rig.start().await;
+    rig.wait_polls(2).await;
+
+    let values = rig.engine.values();
+    assert!(
+        matches!(values["big"].error, Some(PlcError::Rejected(_))),
+        "{:?}",
+        values["big"]
+    );
+    assert_eq!(values["sn"].value, Some(PlcValue::Text(String::new())));
+    assert!(
+        server.reads().iter().all(|r| r.count <= 222),
+        "{:?}",
+        server.reads()
+    );
+    assert!(matches!(
+        rig.engine.write_point("sn", &json!("SN-42")).await,
+        Err(PlcError::Rejected(_))
+    ));
+    assert_eq!(server.writes(), 0);
+    let status = rig.engine.status();
+    assert_eq!((status.state, status.dials), (LinkState::Connected, 1));
+    rig.engine.disconnect().await;
+}
+
 // ---- 4. 带类型的错误 ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

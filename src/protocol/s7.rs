@@ -52,6 +52,7 @@ pub fn resolve(address: &str, data_type: DataType) -> Result<Location, String> {
     };
     match data_type {
         DataType::String => return resolve_span(area, rest, SpanKind::String),
+        DataType::SmartString => return resolve_span(area, rest, SpanKind::SmartString),
         DataType::Bytes => return resolve_span(area, rest, SpanKind::Bytes),
         _ => {}
     }
@@ -62,27 +63,34 @@ pub fn resolve(address: &str, data_type: DataType) -> Result<Location, String> {
 
 enum SpanKind {
     String,
+    SmartString,
     Bytes,
 }
 
-/// `起始字节.长度` 形式的变长区域。STRING 的长度是最大字符数（区域另含 2 字节头），Bytes 的长度就是字节数。
+/// `起始字节.长度` 形式的变长区域。STRING 的长度是最大字符数（区域另含 2 字节头），
+/// 200 SMART 字符串另含 1 字节长度头，Bytes 的长度就是字节数。
 fn resolve_span(area: AreaKey, rest: &str, kind: SpanKind) -> Result<Location, String> {
     let (main, n) = rest.split_once('.').ok_or(match kind {
         SpanKind::String => "String 类型需写成 起始字节.最大长度，例如 DB1.DBB38.24",
+        SpanKind::SmartString => "SmartString 类型需写成 起始字节.最大长度，例如 VB100.50",
         SpanKind::Bytes => "Bytes 类型需写成 起始字节.字节数，例如 DB1.DBB38.26",
     })?;
     let start: u32 = main
         .parse()
         .map_err(|_| format!("无效的起始字节: {main}"))?;
     let len = match kind {
-        SpanKind::String => {
+        SpanKind::String | SpanKind::SmartString => {
             let max: u32 = n
                 .parse()
                 .map_err(|_| format!("无效的字符串最大长度: {n}"))?;
             if !(1..=254).contains(&max) {
                 return Err("字符串最大长度需在 1-254 之间".into());
             }
-            max + 2
+            max + if matches!(kind, SpanKind::String) {
+                2
+            } else {
+                1
+            }
         }
         SpanKind::Bytes => {
             let n: u32 = n.parse().map_err(|_| format!("无效的字节数: {n}"))?;
@@ -102,6 +110,12 @@ fn resolve_span(area: AreaKey, rest: &str, kind: SpanKind) -> Result<Location, S
         bit: None,
         writable: true,
     })
+}
+
+/// 单项读 / 写一帧能带的数据字节数：读应答另有 18 字节报头，写请求另有 28 字节。
+pub(crate) fn frame_capacity(pdu: u16) -> (u32, u32) {
+    let pdu = pdu as u32;
+    (pdu.saturating_sub(18), pdu.saturating_sub(28))
 }
 
 fn item_error(code: u8) -> String {
@@ -254,6 +268,13 @@ impl S7 {
 #[async_trait]
 impl Protocol for S7 {
     async fn read(&mut self, region: &Region) -> Result<RegionData, DriverError> {
+        let (cap, _) = frame_capacity(self.pdu);
+        if region.count > cap {
+            return Err(DriverError::Exception(format!(
+                "单次读取 {} 字节超过协商 PDU {} 的单帧上限 {cap} 字节",
+                region.count, self.pdu
+            )));
+        }
         let count = region.count as u16;
         let mut req = vec![
             0x32, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E, 0x00, 0x00, 0x04, 0x01,
@@ -303,6 +324,14 @@ impl Protocol for S7 {
                 )
             }
             WriteValue::Bytes(bytes) => {
+                let (_, cap) = frame_capacity(self.pdu);
+                if bytes.len() as u32 > cap {
+                    return Err(DriverError::Exception(format!(
+                        "单次写入 {} 字节超过协商 PDU {} 的单帧上限 {cap} 字节",
+                        bytes.len(),
+                        self.pdu
+                    )));
+                }
                 let n = bytes.len() as u16;
                 (
                     Self::item_spec(0x02, n, loc.area.index, loc.area.code as u8, loc.start * 8),
@@ -332,7 +361,7 @@ impl Protocol for S7 {
     }
 
     fn max_region(&self, _unit: Unit) -> (u32, u32) {
-        ((self.pdu as u32).saturating_sub(18).max(32), 16)
+        (frame_capacity(self.pdu).0.max(32), 16)
     }
 
     async fn close(&mut self) {
@@ -381,6 +410,21 @@ mod tests {
             "DB100.DBB65520.24",
         ] {
             assert!(resolve(bad, DataType::String).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn smart_string_address_spans_one_length_byte_and_max_length() {
+        let l = resolve("VB100.50", DataType::SmartString).unwrap();
+        assert_eq!((l.area.index, l.start, l.len, l.bit), (1, 100, 51, None));
+        assert_eq!(
+            resolve("DB1.DBB160.254", DataType::SmartString)
+                .unwrap()
+                .len,
+            255
+        );
+        for bad in ["VB100", "VB100.0", "VB100.255", "VB65500.50"] {
+            assert!(resolve(bad, DataType::SmartString).is_err(), "{bad}");
         }
     }
 

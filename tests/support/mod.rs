@@ -55,6 +55,7 @@ struct State {
     mode: Mode,
     accepted: u32,
     pins: Vec<Pin>,
+    pdu: u16,
 }
 
 pub struct S7Server {
@@ -80,6 +81,7 @@ impl S7Server {
             mode: Mode::Normal,
             accepted: 0,
             pins: Vec::new(),
+            pdu: 480,
         }));
         let (kill, _) = watch::channel(0u64);
         let task = {
@@ -106,6 +108,11 @@ impl S7Server {
 
     pub fn set_mode(&self, mode: Mode) {
         self.state.lock().unwrap().mode = mode;
+    }
+
+    /// 通讯协商时应答的 PDU（默认 480），不管客户端请求多少；只影响之后建立的连接。
+    pub fn set_pdu(&self, pdu: u16) {
+        self.state.lock().unwrap().pdu = pdu;
     }
 
     /// 掐断当前所有连接（新连接照常接受）。
@@ -215,7 +222,8 @@ fn ack(job: &[u8], params: &[u8], data: &[u8]) -> Vec<u8> {
 fn handle_job(s7: &[u8], state: &Mutex<State>) -> Vec<u8> {
     let func = s7[10];
     if func == 0xF0 {
-        return ack(s7, &[0xF0, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0xE0], &[]);
+        let [ph, pl] = state.lock().unwrap().pdu.to_be_bytes();
+        return ack(s7, &[0xF0, 0x00, 0x00, 0x01, 0x00, 0x01, ph, pl], &[]);
     }
     let item = &s7[12..24];
     let transport = item[3];
