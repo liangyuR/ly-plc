@@ -19,6 +19,7 @@ pub enum PlcError {
     /// 通讯超时（含连接超时）。连接会被重建。
     Timeout(String),
     /// PLC 应答了但拒绝了请求：S7 访问失败 / 请求被拒、COTP 拒绝、Modbus 异常码、MC 异常结束码。
+    /// S7 单个点位超出协商 PDU 的单帧容量时不发请求，同样归为此类。
     Rejected(String),
     /// 调用方的问题：点位不存在、不可写、值无法按点位类型编码。
     Invalid(String),

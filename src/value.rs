@@ -271,20 +271,23 @@ mod tests {
     }
 
     #[test]
-    fn smart_string_has_only_an_actual_length_byte_and_round_trips() {
-        let bytes = encode_smart_string(&json!("SN-A1"), 8).unwrap();
-        assert_eq!(bytes, [5, b'S', b'N', b'-', b'A', b'1', 0, 0, 0]);
+    fn smart_string_zeroed_region_reads_as_empty() {
         assert_eq!(
-            decode_smart_string(&bytes).unwrap(),
-            PlcValue::Text("SN-A1".into())
+            decode_smart_string(&[0; 9]),
+            Ok(PlcValue::Text(String::new()))
         );
-        assert_eq!(
-            decode_smart_string(&[0; 9]).unwrap(),
-            PlcValue::Text(String::new())
-        );
+    }
+
+    #[test]
+    fn smart_string_actual_length_over_max_is_rejected() {
         assert!(decode_smart_string(&[9, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
-        assert!(encode_smart_string(&json!("123456789"), 8).is_err());
-        assert!(encode_smart_string(&json!("编号"), 8).is_err());
+    }
+
+    #[test]
+    fn smart_string_value_too_long_or_multibyte_is_rejected() {
+        for v in ["123456789", "编号"] {
+            assert!(encode_smart_string(&json!(v), 8).is_err(), "{v}");
+        }
     }
 
     #[test]

@@ -319,6 +319,20 @@ impl PlcConfig {
             if p.access == Access::ReadWrite && !loc.writable {
                 return Err(format!("点位「{}」所在区域只读", p.name));
             }
+            if c.protocol == ProtocolKind::S7 {
+                let (read_cap, write_cap) = protocol::s7::frame_capacity(c.s7.pdu_size);
+                let (cap, what) = if p.access == Access::ReadWrite {
+                    (write_cap, "写入")
+                } else {
+                    (read_cap, "读取")
+                };
+                if loc.len > cap {
+                    return Err(format!(
+                        "点位「{}」占 {} 字节，超过 PDU {} 单次{what}的上限 {cap} 字节",
+                        p.name, loc.len, c.s7.pdu_size
+                    ));
+                }
+            }
             if !p.poll && p.edge != EdgeMode::None {
                 return Err(format!("点位「{}」不轮询，不能配置边沿", p.name));
             }

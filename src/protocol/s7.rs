@@ -112,6 +112,12 @@ fn resolve_span(area: AreaKey, rest: &str, kind: SpanKind) -> Result<Location, S
     })
 }
 
+/// 单项读 / 写一帧能带的数据字节数：读应答另有 18 字节报头，写请求另有 28 字节。
+pub(crate) fn frame_capacity(pdu: u16) -> (u32, u32) {
+    let pdu = pdu as u32;
+    (pdu.saturating_sub(18), pdu.saturating_sub(28))
+}
+
 fn item_error(code: u8) -> String {
     let text = match code {
         0x01 => "硬件故障",
@@ -262,6 +268,13 @@ impl S7 {
 #[async_trait]
 impl Protocol for S7 {
     async fn read(&mut self, region: &Region) -> Result<RegionData, DriverError> {
+        let (cap, _) = frame_capacity(self.pdu);
+        if region.count > cap {
+            return Err(DriverError::Exception(format!(
+                "单次读取 {} 字节超过协商 PDU {} 的单帧上限 {cap} 字节",
+                region.count, self.pdu
+            )));
+        }
         let count = region.count as u16;
         let mut req = vec![
             0x32, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E, 0x00, 0x00, 0x04, 0x01,
@@ -311,6 +324,14 @@ impl Protocol for S7 {
                 )
             }
             WriteValue::Bytes(bytes) => {
+                let (_, cap) = frame_capacity(self.pdu);
+                if bytes.len() as u32 > cap {
+                    return Err(DriverError::Exception(format!(
+                        "单次写入 {} 字节超过协商 PDU {} 的单帧上限 {cap} 字节",
+                        bytes.len(),
+                        self.pdu
+                    )));
+                }
                 let n = bytes.len() as u16;
                 (
                     Self::item_spec(0x02, n, loc.area.index, loc.area.code as u8, loc.start * 8),
@@ -340,7 +361,7 @@ impl Protocol for S7 {
     }
 
     fn max_region(&self, _unit: Unit) -> (u32, u32) {
-        ((self.pdu as u32).saturating_sub(18).max(32), 16)
+        (frame_capacity(self.pdu).0.max(32), 16)
     }
 
     async fn close(&mut self) {
