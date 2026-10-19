@@ -253,7 +253,7 @@ struct Shared {
     status: Mutex<PlcStatus>,
     values: Mutex<HashMap<String, PointValue>>,
     driver: tokio::sync::Mutex<Driver>,
-    /// 轮询之外（`read_now` / 写入）遇到的链路错误。连接已在出错时关掉，由轮询任务按掉线处理。
+    /// 驱动遇到的链路错误。连接已在出错时关掉，由轮询任务按掉线处理。
     link_fault: Mutex<Option<PlcError>>,
     sim: Arc<Mutex<SimMemory>>,
     logbook: Arc<Logbook>,
@@ -318,8 +318,8 @@ impl Shared {
         }
     }
 
-    /// 轮询之外的驱动错误：链路类的立即关掉连接（超时后迟到的应答会错位到下一次请求上），
-    /// 留给轮询任务按掉线处理。
+    /// 驱动错误：链路类的在放开驱动锁之前关掉连接（超时后迟到的应答会错位到下一次请求上），
+    /// 排在锁后面的请求只会看到未连接；留给轮询任务按掉线处理。
     async fn driver_failed(&self, driver: &mut Driver, e: DriverError) -> PlcError {
         let error = PlcError::from(e);
         if error.is_link() {
@@ -407,7 +407,7 @@ impl Shared {
 
     /// 一次轮询。读取、发布新值和计数都在持有驱动锁期间完成，所以写入返回之后才计入的轮询一定读于写入之后。
     ///
-    /// `heartbeat` 为 `None` 时是按需轮询（[`PlcEngine::poll_now`]）：不发心跳、不推进模拟器，
+    /// `heartbeat` 为 `None` 时是按需轮询（[`PlcEngine::poll_now`]）：不发心跳、不推进模拟器、不记周期耗时。
     /// 链路类错误按 [`driver_failed`](Self::driver_failed) 关掉连接交给轮询任务。
     async fn poll_once(
         &self,
@@ -442,10 +442,7 @@ impl Shared {
             };
             let data = match read {
                 Ok(d) => Ok(d),
-                Err(e) if e.is_link() && on_demand => {
-                    return Err(self.driver_failed(&mut guard, e).await)
-                }
-                Err(e) if e.is_link() => return Err(e.into()),
+                Err(e) if e.is_link() => return Err(self.driver_failed(&mut guard, e).await),
                 Err(e) => Err(PlcError::from(e)),
             };
             for &m in &block.members {
@@ -479,7 +476,9 @@ impl Shared {
                     (cp.encode(&Value::Bool(heartbeat.1)), guard.as_mut())
                 {
                     match driver.write(&cp.loc, &v).await {
-                        Err(e) if e.is_link() => return Err(e.into()),
+                        Err(e) if e.is_link() => {
+                            return Err(self.driver_failed(&mut guard, e).await)
+                        }
                         _ => {}
                     }
                 }
@@ -490,7 +489,9 @@ impl Shared {
         let mut s = self.status.lock().unwrap();
         s.poll_count += 1;
         s.last_poll = Some(now_ms());
-        s.cycle_ms = Some(started.elapsed().as_millis() as u64);
+        if !on_demand {
+            s.cycle_ms = Some(started.elapsed().as_millis() as u64);
+        }
         drop(s);
         drop(guard);
         Ok(())

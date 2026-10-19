@@ -124,6 +124,26 @@ async fn poll_now_publishes_a_read_taken_after_the_write_without_waiting_for_the
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poll_now_queued_behind_a_timed_out_poll_does_not_reuse_its_connection() {
+    // 超时连接上迟到的应答会错位到下一次请求上：排队的 poll_now 若复用它，会把错位数据发布进缓存。
+    let server = S7Server::start().await;
+    let rig = rig(config(
+        server.port,
+        20,
+        vec![point("a", "DB1.DBB0", DataType::U8)],
+    ));
+    rig.start().await;
+
+    server.set_mode(Mode::Stall);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let polls = rig.engine.status().poll_count;
+    let e = rig.engine.poll_now().await.unwrap_err();
+    assert!(matches!(e, PlcError::Offline(_)), "{e:?}");
+    assert_eq!(rig.engine.status().poll_count, polls);
+    rig.engine.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_write_confirms_without_waiting_for_polls() {
     let server = S7Server::start().await;
     let rig = rig(config(
