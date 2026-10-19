@@ -71,6 +71,13 @@ impl Serialize for PointValue {
     }
 }
 
+/// 日志关联点位：每条日志附带该点位当前值，写成 `标签=值`（如 `requestSeq=12`），见 [`PlcEngine::set_log_context`]。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogContext {
+    pub point_id: String,
+    pub label: String,
+}
+
 /// [`PlcEngine::write_point_verified`] 的参数：最多写几次，每次写后等多久再读回。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifyOptions {
@@ -255,6 +262,8 @@ struct Shared {
     driver: tokio::sync::Mutex<Driver>,
     /// 驱动遇到的链路错误。连接已在出错时关掉，由轮询任务按掉线处理。
     link_fault: Mutex<Option<PlcError>>,
+    /// 日志关联点位与它当前的上下文文本（`标签=值`），见 [`PlcEngine::set_log_context`]。
+    log_context: Mutex<(Option<LogContext>, Option<String>)>,
     sim: Arc<Mutex<SimMemory>>,
     logbook: Arc<Logbook>,
     sink: EventSink,
@@ -266,8 +275,24 @@ pub struct PlcEngine {
 }
 
 impl Shared {
-    fn log(&self, entry: LogEntry) {
+    fn log(&self, mut entry: LogEntry) {
+        if entry.context.is_none() {
+            entry.context = self.log_context.lock().unwrap().1.clone();
+        }
         self.logbook.log(entry);
+    }
+
+    /// 关联点位的新读数：读失败、不再轮询或掉线时不附带上下文。
+    fn refresh_context(&self, values: &HashMap<String, PointValue>) {
+        let mut context = self.log_context.lock().unwrap();
+        let text = context.0.as_ref().and_then(|point| {
+            let read = values.get(&point.point_id)?;
+            read.value
+                .as_ref()
+                .filter(|_| read.error.is_none())
+                .map(|v| format!("{}={}", point.label, v.display()))
+        });
+        context.1 = text;
     }
 
     fn emit(&self, event: PlcEvent) {
@@ -498,6 +523,7 @@ impl Shared {
     }
 
     fn apply(&self, c: &Compiled, mut fresh: HashMap<String, PointValue>) {
+        self.refresh_context(&fresh);
         let mut changed: HashMap<String, PointValue> = HashMap::new();
         {
             let mut values = self.values.lock().unwrap();
@@ -567,6 +593,7 @@ impl Shared {
     }
 
     fn mark_offline(&self, reason: &str) {
+        self.log_context.lock().unwrap().1 = None;
         let now = now_ms();
         let snapshot: HashMap<String, PointValue> = {
             let mut values = self.values.lock().unwrap();
@@ -685,6 +712,7 @@ impl PlcEngine {
             values: Mutex::new(HashMap::new()),
             driver: tokio::sync::Mutex::new(None),
             link_fault: Mutex::new(None),
+            log_context: Mutex::new((None, None)),
             sim: Arc::new(Mutex::new(SimMemory::default())),
             logbook,
             sink,
@@ -729,6 +757,7 @@ impl PlcEngine {
         };
         if connection_changed {
             self.shared.drop_driver().await;
+            self.shared.log_context.lock().unwrap().1 = None;
             self.shared.status.lock().unwrap().outage_dials = 0;
         }
         self.shared
@@ -760,6 +789,7 @@ impl PlcEngine {
         self.shared.drop_driver().await;
         self.shared.link_fault.lock().unwrap().take();
         self.shared.values.lock().unwrap().clear();
+        self.shared.log_context.lock().unwrap().1 = None;
         self.shared.emit(PlcEvent::Values(HashMap::new()));
         self.shared
             .set_state(LinkState::Disconnected, "已断开".into());
@@ -777,6 +807,21 @@ impl PlcEngine {
         let c = self.shared.compiled.read().unwrap().clone();
         let cp = c.find(id)?;
         self.shared.write_point(cp, value).await.map(|_| ())
+    }
+
+    /// 设置日志关联点位：此后每条日志（值变化、边沿、写入、连接等）的 `context` 都附带该点位当前值，
+    /// 写成 `标签=值`，可按 [`LogQuery::context`](crate::LogQuery::context) 查询。值变化日志取同一轮轮询读到的值，
+    /// 所以与关联点位同一轮变化的信号也归到新值下。该点位读失败、不参与轮询或未连接（含换连接后还没读到新 PLC）时不附带；
+    /// `None` 取消。
+    pub fn set_log_context(&self, context: Option<LogContext>) {
+        let mut slot = self.shared.log_context.lock().unwrap();
+        if slot.0 == context {
+            return;
+        }
+        *slot = (context, None);
+        drop(slot);
+        let values = self.shared.values.lock().unwrap().clone();
+        self.shared.refresh_context(&values);
     }
 
     /// 立即轮询一次：读全部参与轮询的点位、发布到轮询缓存并计入 `poll_count`，不等下一个轮询周期。

@@ -8,7 +8,8 @@ pub mod protocol;
 mod value;
 
 pub use engine::{
-    LinkState, PlcEngine, PlcStatus, PointValue, VerifiedWrite, VerifyError, VerifyOptions,
+    LinkState, LogContext, PlcEngine, PlcStatus, PointValue, VerifiedWrite, VerifyError,
+    VerifyOptions,
 };
 pub use error::PlcError;
 pub use event::{EdgeEvent, EventSink, PlcEvent};

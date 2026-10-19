@@ -69,6 +69,9 @@ pub struct LogEntry {
     pub message: String,
     pub old_value: Option<String>,
     pub new_value: Option<String>,
+    /// 关联上下文：设置了日志关联点位（[`PlcEngine::set_log_context`](crate::PlcEngine::set_log_context)）时为
+    /// 记录这条日志时该点位的值，形如 `requestSeq=12`。
+    pub context: Option<String>,
 }
 
 impl LogEntry {
@@ -83,6 +86,7 @@ impl LogEntry {
             message: message.into(),
             old_value: None,
             new_value: None,
+            context: None,
         }
     }
 
@@ -107,6 +111,8 @@ pub struct LogQuery {
     pub levels: Vec<String>,
     pub categories: Vec<String>,
     pub point_id: Option<String>,
+    /// 按关联上下文精确匹配，如 `requestSeq=12`。
+    pub context: Option<String>,
     pub keyword: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
@@ -140,14 +146,26 @@ CREATE TABLE IF NOT EXISTS plc_log (
     point_name TEXT,
     message TEXT NOT NULL,
     old_value TEXT,
-    new_value TEXT
+    new_value TEXT,
+    context TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_plc_log_ts ON plc_log(ts);
 CREATE INDEX IF NOT EXISTS idx_plc_log_point ON plc_log(point_id, ts);
 ";
 
+/// 0.3 及以前建的库没有 context 列：补上空列，旧记录的上下文为空。
+fn add_context_column(conn: &Connection) -> rusqlite::Result<()> {
+    let present = conn
+        .prepare("SELECT 1 FROM pragma_table_info('plc_log') WHERE name = 'context'")?
+        .exists([])?;
+    if !present {
+        conn.execute_batch("ALTER TABLE plc_log ADD COLUMN context TEXT;")?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_plc_log_context ON plc_log(context, ts);")
+}
+
 const COLUMNS: &str =
-    "id, ts, level, category, point_id, point_name, message, old_value, new_value";
+    "id, ts, level, category, point_id, point_name, message, old_value, new_value, context";
 
 fn open_conn(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -168,6 +186,7 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<LogEntry> {
         message: row.get(6)?,
         old_value: row.get(7)?,
         new_value: row.get(8)?,
+        context: row.get(9)?,
     })
 }
 
@@ -179,6 +198,7 @@ impl Logbook {
         let writer = open_conn(path).map_err(|e| format!("打开日志库失败: {e}"))?;
         writer
             .execute_batch(SCHEMA)
+            .and_then(|_| add_context_column(&writer))
             .map_err(|e| format!("初始化日志库失败: {e}"))?;
         let reader = open_conn(path).map_err(|e| format!("打开日志库失败: {e}"))?;
         let retention = Arc::new(AtomicU32::new(retention_days));
@@ -224,14 +244,19 @@ impl Logbook {
             clauses.push("point_id = ?".into());
             args.push(SqlValue::Text(p.clone()));
         }
+        if let Some(c) = q.context.as_ref().filter(|s| !s.is_empty()) {
+            clauses.push("context = ?".into());
+            args.push(SqlValue::Text(c.clone()));
+        }
         if let Some(k) = q
             .keyword
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
-            clauses.push("(message LIKE ? OR point_name LIKE ?)".into());
+            clauses.push("(message LIKE ? OR point_name LIKE ? OR context LIKE ?)".into());
             let pattern = format!("%{k}%");
+            args.push(SqlValue::Text(pattern.clone()));
             args.push(SqlValue::Text(pattern.clone()));
             args.push(SqlValue::Text(pattern));
         }
@@ -314,7 +339,7 @@ fn insert_batch(conn: &mut Connection, batch: &mut [LogEntry]) -> rusqlite::Resu
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO plc_log (ts, level, category, point_id, point_name, message, old_value, new_value) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO plc_log (ts, level, category, point_id, point_name, message, old_value, new_value, context) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
         for e in batch.iter_mut() {
             stmt.execute(params![
@@ -325,7 +350,8 @@ fn insert_batch(conn: &mut Connection, batch: &mut [LogEntry]) -> rusqlite::Resu
                 e.point_name,
                 e.message,
                 e.old_value,
-                e.new_value
+                e.new_value,
+                e.context
             ])?;
             e.id = tx.last_insert_rowid();
         }

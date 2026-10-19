@@ -646,3 +646,189 @@ async fn dial_statistics_track_each_outage() {
     assert!(fresh.dials <= 1 && fresh.last_dial_error.is_none() && fresh.last_error.is_none());
     rig.engine.disconnect().await;
 }
+
+// ---- 日志关联上下文 ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn log_context_tags_changes_and_writes_with_the_context_point_read_in_the_same_poll() {
+    let server = S7Server::start().await;
+    let mut flag = point("flag", "DB1.DBX4.0", DataType::Bool);
+    flag.access = Access::Read;
+    flag.edge = EdgeMode::Rising;
+    let rig = rig(config(
+        server.port,
+        20,
+        vec![
+            point("seq", "DB1.DBW0", DataType::U16),
+            flag,
+            point("out", "DB1.DBB6", DataType::U8),
+        ],
+    ));
+    rig.start().await;
+    rig.engine.set_log_context(Some(ly_plc::LogContext {
+        point_id: "seq".into(),
+        label: "requestSeq".into(),
+    }));
+
+    // 序号与信号在同一轮里变：信号的变化日志归到新序号。
+    server.set_db(1, 0, &[0, 12, 0, 0, 1]);
+    rig.wait_polls(2).await;
+    rig.engine.write_point("out", &json!(5)).await.unwrap();
+    let tagged = |context: &str| {
+        rig.logbook
+            .query(&LogQuery {
+                context: Some(context.into()),
+                ..LogQuery::default()
+            })
+            .unwrap()
+            .items
+    };
+    wait_until("tagged logs", Duration::from_secs(3), || {
+        tagged("requestSeq=12").len() >= 4
+    })
+    .await;
+    let entries = tagged("requestSeq=12");
+    for (point, category) in [
+        ("seq", "value"),
+        ("flag", "value"),
+        ("flag", "edge"),
+        ("out", "write"),
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.point_id.as_deref() == Some(point) && e.category == category),
+            "{point} {category}: {entries:?}"
+        );
+    }
+    assert!(tagged("requestSeq=0")
+        .iter()
+        .all(|e| e.point_id.as_deref() != Some("flag")));
+
+    rig.engine.disconnect().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let last = rig
+        .logbook
+        .query(&LogQuery {
+            limit: Some(1),
+            ..LogQuery::default()
+        })
+        .unwrap()
+        .items;
+    assert_eq!(last[0].category, "connection");
+    assert_eq!(last[0].context, None, "断开后不再附带上下文");
+}
+
+fn context_logs(rig: &support::Rig, context: &str) -> Vec<ly_plc::LogEntry> {
+    rig.logbook
+        .query(&LogQuery {
+            context: Some(context.into()),
+            ..LogQuery::default()
+        })
+        .unwrap()
+        .items
+}
+
+fn request_seq() -> Option<ly_plc::LogContext> {
+    Some(ly_plc::LogContext {
+        point_id: "seq".into(),
+        label: "requestSeq".into(),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_switching_the_connection_does_not_tag_logs_with_the_old_plc_context() {
+    let first = S7Server::start().await;
+    let second = S7Server::start().await;
+    let points = vec![point("seq", "DB1.DBW0", DataType::U16)];
+    let rig = rig(config(first.port, 20, points.clone()));
+    rig.start().await;
+    rig.engine.set_log_context(request_seq());
+    first.set_db(1, 0, &[0, 12]);
+    wait_until("old plc context", Duration::from_secs(3), || {
+        !context_logs(&rig, "requestSeq=12").is_empty()
+    })
+    .await;
+
+    rig.engine
+        .apply_config(config(second.port, 20, points))
+        .await
+        .unwrap();
+    wait_until("new plc read", Duration::from_secs(3), || {
+        !context_logs(&rig, "requestSeq=0").is_empty()
+    })
+    .await;
+    let stale: Vec<_> = context_logs(&rig, "requestSeq=12")
+        .into_iter()
+        .filter(|e| e.category != "value")
+        .collect();
+    assert!(stale.is_empty(), "{stale:?}");
+    rig.engine.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_point_no_longer_polled_stops_tagging_logs() {
+    let server = S7Server::start().await;
+    let seq = point("seq", "DB1.DBW0", DataType::U16);
+    let out = point("out", "DB1.DBB6", DataType::U8);
+    let rig = rig(config(server.port, 20, vec![seq.clone(), out.clone()]));
+    rig.start().await;
+    rig.engine.set_log_context(request_seq());
+    server.set_db(1, 0, &[0, 12]);
+    wait_until("context", Duration::from_secs(3), || {
+        !context_logs(&rig, "requestSeq=12").is_empty()
+    })
+    .await;
+
+    let mut unpolled = seq;
+    unpolled.poll = false;
+    rig.engine
+        .apply_config(config(server.port, 20, vec![unpolled, out]))
+        .await
+        .unwrap();
+    rig.wait_polls(2).await;
+    server.set_db(1, 6, &[7]);
+    let change = || {
+        rig.logbook
+            .query(&LogQuery {
+                point_id: Some("out".into()),
+                categories: vec!["value".into()],
+                ..LogQuery::default()
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|e| e.new_value.as_deref() == Some("7"))
+    };
+    wait_until("out change", Duration::from_secs(3), || change().is_some()).await;
+    assert_eq!(change().unwrap().context, None);
+    rig.engine.disconnect().await;
+}
+
+#[test]
+fn logbook_created_by_0_3_gains_the_context_column_on_open() {
+    let db = std::env::temp_dir().join(format!("ly-plc-old-schema-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE plc_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, level TEXT NOT NULL,
+             category TEXT NOT NULL, point_id TEXT, point_name TEXT, message TEXT NOT NULL, old_value TEXT, new_value TEXT);
+             INSERT INTO plc_log (ts, level, category, message) VALUES (1, 'info', 'connection', '旧记录');",
+        )
+        .unwrap();
+    }
+    let sink: ly_plc::EventSink = std::sync::Arc::new(|_| {});
+    let logbook = ly_plc::Logbook::open(&db, sink, 0).unwrap();
+    let page = logbook.query(&LogQuery::default()).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(
+        (
+            page.items[0].message.as_str(),
+            page.items[0].context.as_deref()
+        ),
+        ("旧记录", None)
+    );
+    drop(logbook);
+    let _ = std::fs::remove_file(&db);
+}
