@@ -63,9 +63,12 @@ let v = engine.read_now("result").await?;                       // 只读这个�
 let report = engine
     .write_point_verified("result", &json!(2), VerifyOptions { attempts: 12, delay: Duration::from_millis(5) })
     .await?;                                                    // 写 → 等 delay → read_now → 比较，不一致就重写
+engine.poll_now().await?;                                       // 立即轮询一次：全部轮询点位进缓存，poll_count 加一
 ```
 
-二者与轮询、`write_point` 共用同一把驱动锁，串行执行。`write_point_verified` 的期望值按读取的解码路径算（`f32` 舍入一致）；写入 / 读回本身失败立即返回，用尽次数仍不一致返回 `PlcError::Mismatch`，`VerifyError.report` 里有尝试次数与最后一次读回的值。
+三者与轮询、`write_point` 共用同一把驱动锁，串行执行。`write_point_verified` 的期望值按读取的解码路径算（`f32` 舍入一致）；写入 / 读回本身失败立即返回，用尽次数仍不一致返回 `PlcError::Mismatch`，`VerifyError.report` 里有尝试次数与最后一次读回的值。
+
+轮询（周期的与 `poll_now`）在持有驱动锁期间读取、发布新值并递增 `poll_count`：`write_point` 返回时记下 `poll_count = n`，之后读到 `poll_count > n` 时缓存里的值一定读于写入之后。所以「写一组点位、再从缓存核对」只需写完调用一次 `poll_now`，不用等两个轮询周期。
 
 ### 只写、不轮询的点位
 

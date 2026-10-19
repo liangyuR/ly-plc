@@ -89,6 +89,41 @@ async fn read_now_is_serialized_with_polling() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poll_now_publishes_a_read_taken_after_the_write_without_waiting_for_the_period() {
+    let server = S7Server::start().await;
+    let rig = rig(config(
+        server.port,
+        SLOW_POLL_MS,
+        vec![
+            point("out", "DB1.DBW4", DataType::U16),
+            point("in", "DB1.DBW8", DataType::U16),
+        ],
+    ));
+    rig.start().await;
+    let polls = rig.engine.status().poll_count;
+
+    rig.engine.write_point("out", &json!(0x1234)).await.unwrap();
+    server.set_db(1, 8, &[0, 7]);
+    let started = Instant::now();
+    rig.engine.poll_now().await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(rig.engine.status().poll_count, polls + 1);
+    let values = rig.engine.values();
+    assert_eq!(values["out"].value, Some(PlcValue::Int(0x1234)));
+    assert_eq!(values["in"].value, Some(PlcValue::Int(7)));
+
+    rig.engine.disconnect().await;
+    assert!(matches!(
+        rig.engine.poll_now().await,
+        Err(PlcError::Offline(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_write_confirms_without_waiting_for_polls() {
     let server = S7Server::start().await;
     let rig = rig(config(

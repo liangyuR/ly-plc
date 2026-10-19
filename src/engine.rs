@@ -405,16 +405,28 @@ impl Shared {
         }
     }
 
+    /// 一次轮询。读取、发布新值和计数都在持有驱动锁期间完成，所以写入返回之后才计入的轮询一定读于写入之后。
+    ///
+    /// `heartbeat` 为 `None` 时是按需轮询（[`PlcEngine::poll_now`]）：不发心跳、不推进模拟器，
+    /// 链路类错误按 [`driver_failed`](Self::driver_failed) 关掉连接交给轮询任务。
     async fn poll_once(
         &self,
         c: &Compiled,
-        heartbeat: &mut (Instant, bool),
+        heartbeat: Option<&mut (Instant, bool)>,
     ) -> Result<(), PlcError> {
+        let started = Instant::now();
+        let on_demand = heartbeat.is_none();
         let mut guard = self.driver.lock().await;
         let Some(driver) = guard.as_mut() else {
-            return Err(self.take_fault_or_offline());
+            return Err(if on_demand {
+                PlcError::offline()
+            } else {
+                self.take_fault_or_offline()
+            });
         };
-        driver.tick();
+        if !on_demand {
+            driver.tick();
+        }
         let polled: Vec<usize> = (0..c.points.len())
             .filter(|&i| c.points[i].point.poll)
             .collect();
@@ -424,8 +436,15 @@ impl Shared {
         let mut fresh: HashMap<String, PointValue> = HashMap::with_capacity(polled.len());
 
         for block in &blocks {
-            let data = match driver.read(&block.region).await {
+            let read = match guard.as_mut() {
+                Some(driver) => driver.read(&block.region).await,
+                None => return Err(PlcError::offline()),
+            };
+            let data = match read {
                 Ok(d) => Ok(d),
+                Err(e) if e.is_link() && on_demand => {
+                    return Err(self.driver_failed(&mut guard, e).await)
+                }
                 Err(e) if e.is_link() => return Err(e.into()),
                 Err(e) => Err(PlcError::from(e)),
             };
@@ -451,12 +470,14 @@ impl Shared {
             }
         }
 
-        if let Some((i, interval)) = c.heartbeat {
+        if let (Some((i, interval)), Some(heartbeat)) = (c.heartbeat, heartbeat) {
             if heartbeat.0.elapsed() >= interval {
                 heartbeat.0 = Instant::now();
                 heartbeat.1 = !heartbeat.1;
                 let cp = &c.points[i];
-                if let Ok(v) = cp.encode(&Value::Bool(heartbeat.1)) {
+                if let (Ok(v), Some(driver)) =
+                    (cp.encode(&Value::Bool(heartbeat.1)), guard.as_mut())
+                {
                     match driver.write(&cp.loc, &v).await {
                         Err(e) if e.is_link() => return Err(e.into()),
                         _ => {}
@@ -464,9 +485,14 @@ impl Shared {
                 }
             }
         }
-        drop(guard);
 
         self.apply(c, fresh);
+        let mut s = self.status.lock().unwrap();
+        s.poll_count += 1;
+        s.last_poll = Some(now_ms());
+        s.cycle_ms = Some(started.elapsed().as_millis() as u64);
+        drop(s);
+        drop(guard);
         Ok(())
     }
 
@@ -620,18 +646,12 @@ async fn poll_loop(shared: Arc<Shared>) {
         }
 
         let started = Instant::now();
-        if let Err(e) = shared.poll_once(&c, &mut heartbeat).await {
+        if let Err(e) = shared.poll_once(&c, Some(&mut heartbeat)).await {
             shared.lose_link(&mut last_error, e).await;
             sleep(reconnect).await;
             continue;
         }
         let cycle = started.elapsed();
-        {
-            let mut s = shared.status.lock().unwrap();
-            s.poll_count += 1;
-            s.last_poll = Some(now_ms());
-            s.cycle_ms = Some(cycle.as_millis() as u64);
-        }
         if last_emit.elapsed() >= Duration::from_secs(1) {
             last_emit = Instant::now();
             shared.update_status(|_| {});
@@ -756,6 +776,16 @@ impl PlcEngine {
         let c = self.shared.compiled.read().unwrap().clone();
         let cp = c.find(id)?;
         self.shared.write_point(cp, value).await.map(|_| ())
+    }
+
+    /// 立即轮询一次：读全部参与轮询的点位、发布到轮询缓存并计入 `poll_count`，不等下一个轮询周期。
+    ///
+    /// 与周期轮询、写入共用驱动锁，按先后串行；轮询在持有驱动锁期间发布值并计数，所以在 [`write_point`](Self::write_point)
+    /// 返回之后调用，返回时缓存里的值一定读于写入之后。不发心跳。未连接时返回 [`PlcError::Offline`]；
+    /// 链路类错误的处理同 [`write_point`](Self::write_point)。
+    pub async fn poll_now(&self) -> Result<(), PlcError> {
+        let c = self.shared.compiled.read().unwrap().clone();
+        self.shared.poll_once(&c, None).await
     }
 
     /// 立即从 PLC 读一个点位：只读这个点位的区域，不经过也不更新轮询缓存，不记日志。
