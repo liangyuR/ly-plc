@@ -1,5 +1,16 @@
 # 变更记录
 
+## 0.4.0
+
+### 新增
+
+- `PlcEngine::set_log_context(Some(LogContext { point_id, label }))`：日志关联点位。之后每条日志的 `context` 带上该点位当前值（如 `requestSeq=12`）；值变化日志取同一轮轮询的读数，读失败或未连接时不附带。
+- `LogQuery.context` 按上下文精确查询；关键字搜索也匹配上下文。
+
+### 破坏性变更
+
+- `LogEntry` 新增 `context` 字段、`LogQuery` 新增 `context` 字段：完整的结构体字面量需要补字段（用 `..Default::default()` 的 `LogQuery` 不受影响）。日志库表 `plc_log` 新增 `context` 列，打开旧库时自动补列，旧记录为空。
+
 ## 0.3.1
 
 ### 新增

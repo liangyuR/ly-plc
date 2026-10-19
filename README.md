@@ -90,6 +90,14 @@ engine.poll_now().await?;                                       // 立即轮询�
 
 `read_now` / 写入遇到链路类错误时会立即关掉当前连接（超时后迟到的应答会错位到下一次请求上），由轮询任务按掉线处理并重连。`PlcError` 序列化为 `{"kind": "timeout", "message": "通讯超时"}`；`PointValue` 的 JSON 仍是 `error` 文本，另加 `errorKind`。`impl From<PlcError> for String`，返回 `Result<_, String>` 的调用方可以继续用 `?`。
 
+### 日志关联上下文
+
+```rust
+engine.set_log_context(Some(LogContext { point_id: "p_requestSeq".into(), label: "requestSeq".into() }));
+```
+
+设置后每条日志（值变化、边沿、写入、连接等）的 `context` 都带上该点位当前值，写成 `requestSeq=12`；值变化日志取同一轮轮询读到的值，与关联点位同一轮变化的信号也归到新值下。该点位读失败或未连接时不附带。按 `LogQuery { context: Some("requestSeq=12".into()), .. }` 精确查询，关键字搜索也匹配上下文。0.3 及以前建的日志库在打开时补上 `context` 列，旧记录为空。
+
 ### 重拨统计
 
 `PlcStatus` 里：`dials`（`connect()` 以来的拨号总数）、`outage_dials`（本次掉线以来的拨号次数，含成功的那次；链路再次中断时清零，所以恢复后读到的就是这次恢复用了几次）、`last_dial_error`（最近一次拨号失败的原因，连接成功后保留）、`last_error`（最近一次进入 `Error` 状态的原因）。`connect()` 时全部清零。
