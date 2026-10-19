@@ -96,7 +96,7 @@ engine.poll_now().await?;                                       // 立即轮询�
 engine.set_log_context(Some(LogContext { point_id: "p_requestSeq".into(), label: "requestSeq".into() }));
 ```
 
-设置后每条日志（值变化、边沿、写入、连接等）的 `context` 都带上该点位当前值，写成 `requestSeq=12`；值变化日志取同一轮轮询读到的值，与关联点位同一轮变化的信号也归到新值下。该点位读失败或未连接时不附带。按 `LogQuery { context: Some("requestSeq=12".into()), .. }` 精确查询，关键字搜索也匹配上下文。0.3 及以前建的日志库在打开时补上 `context` 列，旧记录为空。
+设置后每条日志（值变化、边沿、写入、连接等）的 `context` 都带上该点位当前值，写成 `requestSeq=12`；值变化日志取同一轮轮询读到的值，与关联点位同一轮变化的信号也归到新值下。该点位读失败、不参与轮询或未连接（含 `apply_config` 换连接后还没读到新 PLC）时不附带。按 `LogQuery { context: Some("requestSeq=12".into()), .. }` 精确查询，关键字搜索也匹配上下文。0.3 及以前建的日志库在打开时补上 `context` 列，旧记录为空。
 
 ### 重拨统计
 

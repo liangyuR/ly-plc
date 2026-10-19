@@ -282,20 +282,16 @@ impl Shared {
         self.logbook.log(entry);
     }
 
-    /// 关联点位的新读数：读失败或掉线时不附带上下文。
+    /// 关联点位的新读数：读失败、不再轮询或掉线时不附带上下文。
     fn refresh_context(&self, values: &HashMap<String, PointValue>) {
         let mut context = self.log_context.lock().unwrap();
-        let Some(point) = context.0.as_ref() else {
-            return;
-        };
-        let Some(read) = values.get(&point.point_id) else {
-            return;
-        };
-        let text = read
-            .value
-            .as_ref()
-            .filter(|_| read.error.is_none())
-            .map(|v| format!("{}={}", point.label, v.display()));
+        let text = context.0.as_ref().and_then(|point| {
+            let read = values.get(&point.point_id)?;
+            read.value
+                .as_ref()
+                .filter(|_| read.error.is_none())
+                .map(|v| format!("{}={}", point.label, v.display()))
+        });
         context.1 = text;
     }
 
@@ -760,6 +756,7 @@ impl PlcEngine {
         };
         if connection_changed {
             self.shared.drop_driver().await;
+            self.shared.log_context.lock().unwrap().1 = None;
             self.shared.status.lock().unwrap().outage_dials = 0;
         }
         self.shared
@@ -813,7 +810,8 @@ impl PlcEngine {
 
     /// 设置日志关联点位：此后每条日志（值变化、边沿、写入、连接等）的 `context` 都附带该点位当前值，
     /// 写成 `标签=值`，可按 [`LogQuery::context`](crate::LogQuery::context) 查询。值变化日志取同一轮轮询读到的值，
-    /// 所以与关联点位同一轮变化的信号也归到新值下。该点位读失败或未连接时不附带；`None` 取消。
+    /// 所以与关联点位同一轮变化的信号也归到新值下。该点位读失败、不参与轮询或未连接（含换连接后还没读到新 PLC）时不附带；
+    /// `None` 取消。
     pub fn set_log_context(&self, context: Option<LogContext>) {
         let mut slot = self.shared.log_context.lock().unwrap();
         if slot.0 == context {

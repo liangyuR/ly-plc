@@ -4,7 +4,7 @@
 
 ### 新增
 
-- `PlcEngine::set_log_context(Some(LogContext { point_id, label }))`：日志关联点位。之后每条日志的 `context` 带上该点位当前值（如 `requestSeq=12`）；值变化日志取同一轮轮询的读数，读失败或未连接时不附带。
+- `PlcEngine::set_log_context(Some(LogContext { point_id, label }))`：日志关联点位。之后每条日志的 `context` 带上该点位当前值（如 `requestSeq=12`）；值变化日志取同一轮轮询的读数，读失败、不参与轮询或未连接（含 `apply_config` 换连接后还没读到新 PLC）时不附带。
 - `LogQuery.context` 按上下文精确查询；关键字搜索也匹配上下文。
 
 ### 破坏性变更

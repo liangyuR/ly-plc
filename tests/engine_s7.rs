@@ -699,6 +699,92 @@ async fn log_context_tags_changes_and_writes_with_the_context_point_read_in_the_
     assert_eq!(last[0].context, None, "断开后不再附带上下文");
 }
 
+fn context_logs(rig: &support::Rig, context: &str) -> Vec<ly_plc::LogEntry> {
+    rig.logbook
+        .query(&LogQuery {
+            context: Some(context.into()),
+            ..LogQuery::default()
+        })
+        .unwrap()
+        .items
+}
+
+fn request_seq() -> Option<ly_plc::LogContext> {
+    Some(ly_plc::LogContext {
+        point_id: "seq".into(),
+        label: "requestSeq".into(),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_switching_the_connection_does_not_tag_logs_with_the_old_plc_context() {
+    let first = S7Server::start().await;
+    let second = S7Server::start().await;
+    let points = vec![point("seq", "DB1.DBW0", DataType::U16)];
+    let rig = rig(config(first.port, 20, points.clone()));
+    rig.start().await;
+    rig.engine.set_log_context(request_seq());
+    first.set_db(1, 0, &[0, 12]);
+    wait_until("old plc context", Duration::from_secs(3), || {
+        !context_logs(&rig, "requestSeq=12").is_empty()
+    })
+    .await;
+
+    rig.engine
+        .apply_config(config(second.port, 20, points))
+        .await
+        .unwrap();
+    wait_until("new plc read", Duration::from_secs(3), || {
+        !context_logs(&rig, "requestSeq=0").is_empty()
+    })
+    .await;
+    let stale: Vec<_> = context_logs(&rig, "requestSeq=12")
+        .into_iter()
+        .filter(|e| e.category != "value")
+        .collect();
+    assert!(stale.is_empty(), "{stale:?}");
+    rig.engine.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_point_no_longer_polled_stops_tagging_logs() {
+    let server = S7Server::start().await;
+    let seq = point("seq", "DB1.DBW0", DataType::U16);
+    let out = point("out", "DB1.DBB6", DataType::U8);
+    let rig = rig(config(server.port, 20, vec![seq.clone(), out.clone()]));
+    rig.start().await;
+    rig.engine.set_log_context(request_seq());
+    server.set_db(1, 0, &[0, 12]);
+    wait_until("context", Duration::from_secs(3), || {
+        !context_logs(&rig, "requestSeq=12").is_empty()
+    })
+    .await;
+
+    let mut unpolled = seq;
+    unpolled.poll = false;
+    rig.engine
+        .apply_config(config(server.port, 20, vec![unpolled, out]))
+        .await
+        .unwrap();
+    rig.wait_polls(2).await;
+    server.set_db(1, 6, &[7]);
+    let change = || {
+        rig.logbook
+            .query(&LogQuery {
+                point_id: Some("out".into()),
+                categories: vec!["value".into()],
+                ..LogQuery::default()
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|e| e.new_value.as_deref() == Some("7"))
+    };
+    wait_until("out change", Duration::from_secs(3), || change().is_some()).await;
+    assert_eq!(change().unwrap().context, None);
+    rig.engine.disconnect().await;
+}
+
 #[test]
 fn logbook_created_by_0_3_gains_the_context_column_on_open() {
     let db = std::env::temp_dir().join(format!("ly-plc-old-schema-{}.db", std::process::id()));
