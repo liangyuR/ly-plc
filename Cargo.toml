@@ -1,6 +1,6 @@
 [package]
 name = "ly-plc"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "通用 PLC 通讯库：Modbus TCP / Siemens S7 / Mitsubishi MC，含轮询引擎与 SQLite 日志"
 license = "MIT"
